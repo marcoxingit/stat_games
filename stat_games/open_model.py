@@ -1,16 +1,22 @@
 from dataclasses import dataclass, field
 from typing import Optional
 from discopy.cat import Category
-from discopy.markov import Ty, Box
+from discopy.markov import Ty, Box, Copy, Diagram, Id, Swap
 import numpyro.distributions as dist  # NumPyro's distributions
 from functools import partial
+def NACopy(x: Ty, n: int = 2) -> Box:
+    if x.is_atomic:
+        return Copy(x, n)
+    elif len(x) == 2 and n == 2:
+        return Copy(x[0], n) @ Copy(x[1], n) >> Id(x[0]) @ NASwap(x[0], x[1]) @ Id(x[1])
+    return Box("Copy", x, x**n)
 
 # Define some basic types.
 R = Ty("R")
 N = Ty("N")
 
 def channelize_log_prob(dist):
-    return lambda *x: dist(*x).log_prob
+    return lambda *x: dist(*x).log_prob # We can use partial instead
 
 # Extend Box to include a probabilistic distribution.
 @dataclass
@@ -41,7 +47,10 @@ class OpenModel:
     def __post_init__(self):
         # Initialize channel if not provided.
         if self.symbolic_channel is None:
-            self.symbolic_channel = ProbBox(name="", dom=self.dom, cod=self.cod, log_prob_channel=self.log_prob_channel)
+            self.symbolic_channel = ProbBox(name="channel", dom=self.dom, cod=self.latent @ self.cod, log_prob_channel=self.log_prob_channel)
+            print(self.symbolic_channel.dom)
+            
+        self.len_target = len(self.latent) + len(self.cod)
         
     def __rshift__(self, other) :
         return self.compose(other)
@@ -49,11 +58,11 @@ class OpenModel:
     def compose(self, other):
         dom = self.dom
         cod = other.cod
-        latent_space = self.latent @ other.latent
-        log_prob_channel = #lambda x, latent, z: self.log_prob_channel(x,latent) + other.log_prob_channel(latent, z)
-        
+        latent_space = self.latent @ other.latent @ other.cod
+        log_prob_channel = lambda x: (lambda full_target_space: self.log_prob_channel(x,full_target_space[:self.len_target]) + other.log_prob_channel(full_target_space[len(self.dom):len(self.dom)+len(other.dom)], full_target_space[len(self.dom)+len(other.dom):]))
+        symbolic_channel = self.symbolic_channel >> (Id(self.latent) @ NACopy(self.cod) ) >> (Id(self.latent @ self.cod) @ other.symbolic_channel)
         # This is problematic because while in ML we do not need to remember what generated what here we do.
-        return OpenModel(dom=dom, cod=cod, latent=latent_space, log_prob_channel=log_prob_channel)
+        return OpenModel(dom=dom, cod=cod, latent=latent_space, log_prob_channel=log_prob_channel, symbolic_channel=symbolic_channel)
             
 # @dataclass
 # class BayesianLens(OpenModel):
@@ -110,5 +119,6 @@ if __name__ == "__main__":
     sum_model = OpenModel(dom=R, cod=R, log_prob_channel=channelized_sum)
     chaining_sums = sum_model >> sum_model
     chaining_sums = chaining_sums >> sum_model
-    print(chaining_sums.log_prob_channel(1, 2, 3, 4))
+    chaining_sums.symbolic_channel.draw()
+    # print(chaining_sums.log_prob_channel(1,2,3)(4))
     
