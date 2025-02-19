@@ -11,6 +11,10 @@ def NACopy(x: Ty, n: int = 2) -> Box:
         return Copy(x[0], n) @ Copy(x[1], n) >> Id(x[0]) @ NASwap(x[0], x[1]) @ Id(x[1])
     return Box("Copy", x, x**n)
 
+def pack_args(x):
+    return x if isinstance(x, tuple) else (x,)
+
+
 # Define some basic types.
 R = Ty("R")
 N = Ty("N")
@@ -42,6 +46,7 @@ class OpenModel:
     log_prob_channel: Optional[Ty]
     latent: Optional[Ty] = field(default_factory=lambda: Ty())
     symbolic_channel: Optional[ProbBox] = field(default_factory=lambda: None)
+    depth: int = 0
     
 
     def __post_init__(self):
@@ -58,11 +63,18 @@ class OpenModel:
     def compose(self, other):
         dom = self.dom
         cod = other.cod
+        dept = self.depth + 1
         latent_space = self.latent @ other.latent @ other.cod
-        log_prob_channel = lambda x: (lambda full_target_space: self.log_prob_channel(x,full_target_space[:self.len_target]) + other.log_prob_channel(full_target_space[len(self.dom):len(self.dom)+len(other.dom)], full_target_space[len(self.dom)+len(other.dom):]))
+        print(self.len_target, self.dom, self.cod)
+        
+        log_prob_channel = lambda x: (lambda *full_target_space: self.log_prob_channel(x)(*full_target_space[:self.len_target]) + other.log_prob_channel(*full_target_space[len(self.latent):len(self.latent)+len(other.dom)])(*full_target_space[len(self.latent)+len(other.dom):]))
+        # else:
+        #     log_prob_channel = lambda x: (lambda full_target_space: self.log_prob_channel(x)(full_target_space[:self.len_target]))
+        # log_prob_channel = lambda x: (lambda full_target_space: self.log_prob_channel(x)(*pack_args(full_target_space)[:self.len_target]))
+
         symbolic_channel = self.symbolic_channel >> (Id(self.latent) @ NACopy(self.cod) ) >> (Id(self.latent @ self.cod) @ other.symbolic_channel)
         # This is problematic because while in ML we do not need to remember what generated what here we do.
-        return OpenModel(dom=dom, cod=cod, latent=latent_space, log_prob_channel=log_prob_channel, symbolic_channel=symbolic_channel)
+        return OpenModel(dom=dom, cod=cod, latent=latent_space, log_prob_channel=log_prob_channel, symbolic_channel=symbolic_channel, depth=dept)
             
 # @dataclass
 # class BayesianLens(OpenModel):
@@ -113,12 +125,14 @@ class OpenModel:
 # print(gc.density(1.0))  # log_prob(1.0) for Normal(0,1)
 if __name__ == "__main__":
     def sum(x,y):
+        print(y)
         return x+y
-    channelized_sum = sum
+    channelized_sum = lambda x: partial(sum,x)
     
     sum_model = OpenModel(dom=R, cod=R, log_prob_channel=channelized_sum)
     chaining_sums = sum_model >> sum_model
+    chaining_sums.log_prob_channel(1)(1,2)
     chaining_sums = chaining_sums >> sum_model
-    chaining_sums.symbolic_channel.draw()
-    # print(chaining_sums.log_prob_channel(1,2,3)(4))
+    # chaining_sums.symbolic_channel.draw()
+    print(chaining_sums.log_prob_channel(1)(1,2,3))
     
