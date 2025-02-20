@@ -1,7 +1,8 @@
 from dataclasses import dataclass, field
 from typing import Optional
 from discopy.cat import Category
-from discopy.markov import Ty, Box, Copy, Diagram, Id, Swap
+from discopy.markov import Ty, Copy, Diagram, Id, Swap , Box
+# from discopy.monoidal import Box
 import numpyro.distributions as dist  # NumPyro's distributions
 from functools import partial
 from discopy.utils import (
@@ -80,7 +81,8 @@ class OpenModel:
             
         if self.box_channel is None:
             self.box_channel = Box(self.channel_name, self.dom, self
-                                   .latent @ self.cod)
+                                   .latent @ self.cod) #,data=self.log_prob_channel)
+            self.box_channel.data = self.log_prob_channel
         self.len_target = len(self.latent) + len(self.cod)
         
     def __rshift__(self, other) :
