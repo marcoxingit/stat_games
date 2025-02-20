@@ -4,6 +4,16 @@ from discopy.cat import Category
 from discopy.markov import Ty, Box, Copy, Diagram, Id, Swap
 import numpyro.distributions as dist  # NumPyro's distributions
 from functools import partial
+from discopy.utils import (
+    factory,
+    factory_name,
+    from_tree,
+    assert_isinstance,
+    assert_iscomposable,
+    Whiskerable,
+    AxiomError,
+    get_origin,
+)
 def NACopy(x: Ty, n: int = 2) -> Box:
     if x.is_atomic:
         return Copy(x, n)
@@ -14,6 +24,8 @@ def NACopy(x: Ty, n: int = 2) -> Box:
 def pack_args(x):
     return x if isinstance(x, tuple) else (x,)
 
+# We need to use dimensions in a decent way. In catgrad it is easy because you just have arrays, for distributions it might be more subtle
+# Finite vs Continuous blah blah
 
 # Define some basic types.
 R = Ty("R")
@@ -21,6 +33,9 @@ N = Ty("N")
 
 def channelize_log_prob(dist):
     return lambda *x: dist(*x).log_prob # We can use partial instead
+
+def channelized_dirac_delta(x):
+    return lambda x: dist.Delta(x, event_dim=1)
 
 # Extend Box to include a probabilistic distribution.
 @dataclass
@@ -30,6 +45,13 @@ class ProbBox(Box):
     def __init__(self, name: str, dom: Ty, cod: Ty, log_prob_channel = None):
         super().__init__(name, dom, cod)  # Call Box's constructor
         self.log_prob_channel = log_prob_channel  # Set the distribution attribute
+        
+    # def __hash__(self):
+    #     return hash(repr(self))
+
+    # def __repr__(self):
+    #     return factory_name(type(self))\
+    #         + f"({', '.join(map(repr, self.inside))})"
         
     # def __rshift__(self, other: ProbBox) -> Box:
     #     box = self.compose(other)
@@ -46,36 +68,81 @@ class OpenModel:
     log_prob_channel: Optional[Ty]
     latent: Optional[Ty] = field(default_factory=lambda: Ty())
     symbolic_channel: Optional[ProbBox] = field(default_factory=lambda: None)
-    depth: int = 0
+    box_channel: Optional[Box] = field(default_factory=lambda: None)
+    channel_name: str = "channel"
+   
     
 
     def __post_init__(self):
         # Initialize channel if not provided.
         if self.symbolic_channel is None:
-            self.symbolic_channel = ProbBox(name="channel", dom=self.dom, cod=self.latent @ self.cod, log_prob_channel=self.log_prob_channel)
-            print(self.symbolic_channel.dom)
+            self.symbolic_channel = ProbBox(name=self.channel_name, dom=self.dom, cod=self.latent @ self.cod, log_prob_channel=self.log_prob_channel)
             
+        if self.box_channel is None:
+            self.box_channel = Box(self.channel_name, self.dom, self
+                                   .latent @ self.cod)
         self.len_target = len(self.latent) + len(self.cod)
         
     def __rshift__(self, other) :
         return self.compose(other)
-    # WE need to use some functional stuff, like currying
+    
+    # Problem : we never really use the latent dimension. We need to figure out a way to fix the type in a decent way.
     def compose(self, other):
         dom = self.dom
         cod = other.cod
-        dept = self.depth + 1
         latent_space = self.latent @ other.latent @ other.cod
         print(self.len_target, self.dom, self.cod)
         
-        log_prob_channel = lambda x: (lambda *full_target_space: self.log_prob_channel(x)(*full_target_space[:self.len_target]) + other.log_prob_channel(*full_target_space[len(self.latent):len(self.latent)+len(other.dom)])(*full_target_space[len(self.latent)+len(other.dom):]))
-        # else:
-        #     log_prob_channel = lambda x: (lambda full_target_space: self.log_prob_channel(x)(full_target_space[:self.len_target]))
-        # log_prob_channel = lambda x: (lambda full_target_space: self.log_prob_channel(x)(*pack_args(full_target_space)[:self.len_target]))
-
+        log_prob_channel = (lambda x: (lambda *full_target_space: self.log_prob_channel(x)(*full_target_space[:self.len_target]) 
+                                      + other.log_prob_channel(*full_target_space[len(self.latent):len(self.latent)+len(other.dom)])(*full_target_space[len(self.latent)+len(other.dom):])))
         symbolic_channel = self.symbolic_channel >> (Id(self.latent) @ NACopy(self.cod) ) >> (Id(self.latent @ self.cod) @ other.symbolic_channel)
+        box_channel = self.box_channel >> (Id(self.latent) @ NACopy(self.cod) ) >> (Id(self.latent @ self.cod) @ other.box_channel)
         # This is problematic because while in ML we do not need to remember what generated what here we do.
-        return OpenModel(dom=dom, cod=cod, latent=latent_space, log_prob_channel=log_prob_channel, symbolic_channel=symbolic_channel, depth=dept)
-            
+        return OpenModel(dom=dom, cod=cod, latent=latent_space, log_prob_channel=log_prob_channel, symbolic_channel=symbolic_channel, box_channel=box_channel)
+      
+    @classmethod
+    def Id(cls, x: Ty):
+        return OpenModel(dom=x, cod=x, log_prob_channel=channelized_dirac_delta)
+
+class OpenModelsCategory(Category):
+    """Category where:
+    - Objects are types (Ty)
+    - Morphisms are OpenModel instances
+    """
+
+    def __init__(self):
+        super().__init__("BayesianLens")
+        self.ob, self.ar = Ty, OpenModel
+
+    @staticmethod
+    def id(x: Ty) -> OpenModel:
+        """Identity morphism for a type"""
+        return OpenModel.Id(x)
+
+    @staticmethod
+    def compose(f: OpenModel, g: OpenModel) -> OpenModel:
+        """Sequential composition of Bayesian lenses"""
+        if f.cod != g.dom:
+            raise ValueError(
+                f"Cannot compose lenses with mismatched types: {f.cod} ≠ {g.dom}"
+            )
+        return f >> g
+
+    @staticmethod
+    def tensor(f: OpenModel, g: OpenModel) -> OpenModel:
+        """Parallel composition (tensor product) of Bayesian lenses"""
+        return f @ g
+
+    @staticmethod
+    def copy(x: Ty) -> OpenModel:
+        """Copy morphism for a type"""
+        return NACopy(x)
+
+    @staticmethod
+    def swap(x: Ty, y: Ty) -> OpenModel:
+        """Swap morphism for two types"""
+        return OpenModel.Swap(x,y)     
+         
 # @dataclass
 # class BayesianLens(OpenModel):
 #     inversion: Optional[Box] = None
